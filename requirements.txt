@@ -1,0 +1,7 @@
+streamlit
+playwright
+beautifulsoup4
+pytest-playwright
+nest_asyncio
+ollama
+chromadb

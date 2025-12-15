@@ -1,0 +1,8 @@
+# Environment variables
+.env
+
+# Auth file (anywhere in the repo)
+auth.js
+
+# Generated test files
+generated_tests/
