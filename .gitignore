@@ -2,7 +2,7 @@
 .env
 
 # Auth file (anywhere in the repo)
-auth.js
+auth.json
 
 # Generated test files
 generated_tests/
