@@ -65,20 +65,34 @@ class LLMBrain:
             if isinstance(parsed_json, list):
                 final_plan = parsed_json
                 
-            # Case 2: It's a dict (The issue you faced)
+# Case 2: It's a dict (single test object or wrapped response)
             elif isinstance(parsed_json, dict):
-                # Strategy: Look for ANY value that is a list
-                found_list = False
-                for key, value in parsed_json.items():
-                    if isinstance(value, list):
-                        final_plan = value
-                        found_list = True
-                        print(f"DEBUG: Extracted plan from key: '{key}'")
-                        break
-                
-                if not found_list:
-                    print("Error: JSON is a dict but contains no lists.")
-                    return [{"name": "Error", "description": "LLM returned invalid format (Dict with no list).", "is_error": True}]
+                # If it looks like a single test object, wrap it
+                if parsed_json.get("name") or parsed_json.get("description"):
+                    final_plan = [parsed_json]
+                    print("DEBUG: Parsed single test object; wrapped into list")
+                else:
+                    # Prefer lists of dicts (i.e., actual test arrays)
+                    found_list = False
+                    for key, value in parsed_json.items():
+                        if isinstance(value, list) and value and isinstance(value[0], dict):
+                            final_plan = value
+                            found_list = True
+                            print(f"DEBUG: Extracted plan from key: '{key}' (list of dicts)")
+                            break
+
+                    if not found_list:
+                        # Fallback: first list we find (but warn if it's a list of primitives)
+                        for key, value in parsed_json.items():
+                            if isinstance(value, list):
+                                final_plan = value
+                                found_list = True
+                                print(f"DEBUG: Extracted plan from key: '{key}' (fallback list)")
+                                break
+
+                    if not found_list:
+                        print("Error: JSON is a dict but contains no suitable lists.")
+                        return [{"name": "Error", "description": "LLM returned invalid format (Dict with no list).", "is_error": True}]
             
             
             # --- VALIDATION LOOP ---
@@ -112,23 +126,28 @@ class LLMBrain:
         system_prompt = """
         You are an expert Playwright Automation Engineer (Python).
         Your task: Write a complete, standalone Python script.
-        
+
         STRICT RULES:
-        1. IMPORTS: You MUST use exactly this import line: 
+        1. IMPORTS: You MUST use exactly this import line:
            from playwright.sync_api import sync_playwright
-        2. LOCATORS: Use resilient locators: page.get_by_role(), page.get_by_placeholder().
-        3. DATA: Use the provided USER_DATA values.
-        4. STRUCTURE: 
+        2. VIDEO: The script MUST create a browser context with video recording enabled
+           - Use: context = browser.new_context(record_video_dir="test_videos", record_video_size={"width":1280,"height":720})
+           - Use: page = context.new_page()
+           - After the test completes, close the page (page.close()) then copy the finalized video file
+             into the test artifacts folder (artifacts/<TEST_NAME>/video.webm) using shutil.copy2(page.video.path(), dst).
+        3. LOCATORS: Use resilient locators: page.get_by_role(), page.get_by_placeholder().
+        4. DATA: Use the provided USER_DATA values.
+        5. STRUCTURE:
            - Define a run() function.
            - Inside run(), use 'with sync_playwright() as p:'.
            - Launch browser with headless=False.
-           - Inside run(), set 'page.set_default_timeout(5000)' (5 seconds).
+           - Create a context as specified above, and call 'page.set_default_timeout(5000)'.
+           - At the end, ensure context.close() and browser.close() are called.
            - Call run() at the end under 'if __name__ == "__main__":'.
-        5. STATE MANAGEMENT (CRITICAL):
-           - At the end of the 'run()' function, BEFORE closing the browser:
-           - Save the storage state to 'auth.json'.
-           - Code: context.storage_state(path='auth.json')
-        6. OUTPUT: Return ONLY the Python code.
+        6. STATE MANAGEMENT (CRITICAL):
+           - If the test performed a login step and cookies should be preserved, save storage with:
+             context.storage_state(path='auth.json')
+        7. OUTPUT: Return ONLY the Python code (no markdown or explanations). Ensure code compiles.
         """
         
         user_prompt = f"""

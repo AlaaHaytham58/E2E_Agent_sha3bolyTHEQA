@@ -3,9 +3,13 @@ import asyncio
 from browser_manager import BrowserManager
 import nest_asyncio
 import os 
+import shutil
 from llm_brain import LLMBrain
 import subprocess
 import sys
+
+
+
 # Fix for Playwright's async loop inside Streamlit
 nest_asyncio.apply()
 
@@ -72,7 +76,7 @@ with col2:
 
 
 if "brain" not in st.session_state:
-    st.session_state.brain = LLMBrain(model="freehuntx/qwen3-coder:8b") # Make sure you have this model pulled!
+    st.session_state.brain = LLMBrain(model="qwen3:4b") # Make sure you have this model pulled!
 
 # Initialize specific session states for granular control
 if "accepted_tests" not in st.session_state:
@@ -229,6 +233,7 @@ if st.session_state.scraped_data:
                 st.session_state.approved_tests = approved_tests
                 st.session_state.current_step = "implementation"
                 st.rerun()
+                
 
 # --- PHASE 3: IMPLEMENTATION (Code Generation) ---
 if "approved_tests" in st.session_state and st.session_state.approved_tests:
@@ -243,8 +248,28 @@ if "approved_tests" in st.session_state and st.session_state.approved_tests:
     
     with col_gen:
         st.info(f"Ready to generate {len(st.session_state.approved_tests)} test scripts.")
+
+        # Manual cleanup helper to remove stale generated files
+        if st.button("🧹 Clean Generated Tests"):
+            if os.path.exists("generated_tests"):
+                try:
+                    shutil.rmtree("generated_tests")
+                    st.session_state.generated_code_map = {}
+                    st.success("Old generated tests removed.")
+                except Exception as e:
+                    st.error(f"Failed to remove generated tests: {e}")
+            else:
+                st.info("No generated_tests directory found.")
         
         if st.button("Generate Test Code"):
+            # Pre-generation cleanup to avoid stale views
+            if os.path.exists("generated_tests"):
+                try:
+                    shutil.rmtree("generated_tests")
+                except Exception as e:
+                    st.warning(f"Could not remove old generated_tests: {e}")
+            os.makedirs("generated_tests", exist_ok=True)
+
             progress_bar = st.progress(0)
             
             for i, test in enumerate(st.session_state.approved_tests):
@@ -291,6 +316,44 @@ if "approved_tests" in st.session_state and st.session_state.approved_tests:
                     st.code(code_content, language="python")
                     st.caption(f"Saved to: generated_tests/test_{name.lower().replace(' ', '_')}.py")
 
+                    # Quick helper: inject video recording into generated script if missing
+                    if st.button("🔧 Inject Video Recording", key=f"inject_vid_{name}"):
+                        file_path = f"generated_tests/test_{name.lower().replace(' ', '_')}.py"
+                        try:
+                            with open(file_path, 'r', encoding='utf-8') as f:
+                                orig = f.read()
+                        except Exception as e:
+                            st.error(f"Could not read file: {e}")
+                            orig = None
+
+                        if orig:
+                            if "record_video_dir" in orig or "record_video" in orig:
+                                st.info("Video recording already present in script.")
+                            else:
+                                patched = None
+                                if "page = browser.new_page()" in orig:
+                                    patched = orig.replace(
+                                        "page = browser.new_page()",
+                                        "context = browser.new_context(record_video_dir=\"test_videos\", record_video_size={'width':1280,'height':720})\n            page = context.new_page()"
+                                    )
+                                elif "browser.new_page()" in orig:
+                                    patched = orig.replace(
+                                        "browser.new_page()",
+                                        "context = browser.new_context(record_video_dir=\"test_videos\", record_video_size={'width':1280,'height':720})\n            context.new_page()"
+                                    )
+                                else:
+                                    st.warning("Could not find an insertion point to inject video recording. Please edit the script manually.")
+
+                                if patched:
+                                    try:
+                                        with open(file_path, 'w', encoding='utf-8') as f:
+                                            f.write(patched)
+                                        st.session_state.generated_code_map[name] = patched
+                                        st.success("✅ Injected video recording into script and saved.")
+                                        st.rerun()
+                                    except Exception as e:
+                                        st.error(f"Failed to write patched file: {e}")
+
 # --- PHASE 4: VERIFICATION (Execution) ---
 if st.session_state.get("current_step") == "verification":
     st.divider()
@@ -310,7 +373,12 @@ if st.session_state.get("current_step") == "verification":
             
             # Create a "Run" card for each test
             for test_file in test_files:
-                with st.expander(f"🐍 Run: {test_file}", expanded=True):
+                # --- تتبع حالة التوسيع لكل اختبار ---
+                expand_key = f"expand_{test_file}"
+                if expand_key not in st.session_state:
+                    st.session_state[expand_key] = True  # افتراضي: مفتوح
+
+                with st.expander(f"🐍 Run: {test_file}", expanded=st.session_state[expand_key]):
                     
                     col_actions, col_logs = st.columns([1, 2])
                     
@@ -320,15 +388,41 @@ if st.session_state.get("current_step") == "verification":
                                 try:
                                     # EXECUTION ENGINE
                                     # Runs the script as a separate process: 'python generated_tests/test_xyz.py'
+                                    # # Store results in session state to persist after rerun
+                                    # --- قبل التشغيل: احصل على قائمة الفيديوهات الحالية ---
+                                    video_dir = "test_videos"
+                                    os.makedirs(video_dir, exist_ok=True)
+                                    existing_videos = set(os.listdir(video_dir))
+                                    
+                                    # --- تشغيل الاختبار ---
                                     result = subprocess.run(
                                         [sys.executable, f"generated_tests/{test_file}"],
                                         capture_output=True,
                                         text=True,
-                                        timeout=15 # Safety timeout
+                                        timeout=120
                                     )
                                     
-                                    # Store results in session state to persist after rerun
+                                    # --- بعد التشغيل: اكتشف الفيديو الجديد ---
+                                    new_videos = set(os.listdir(video_dir)) - existing_videos
+                                    video_path = None
+                                    test_name = test_file.replace("test_", "").replace(".py", "")
+                                    if new_videos:
+                                        # خذ أول فيديو جديد (عادةً واحد فقط)
+                                        video_name = next(iter(new_videos))
+                                        src_video = os.path.join(video_dir, video_name)
+                                        try:
+                                            copied = asyncio.run(st.session_state.browser_manager.copy_latest_video_to_artifacts(test_name, src_video))
+                                            if copied:
+                                                video_path = copied
+                                            else:
+                                                video_path = src_video
+                                        except Exception as e:
+                                            print("DEBUG: copy to artifacts failed:", e)
+                                            video_path = src_video
+
+                                    # --- احفظ النتيجة + مسار الفيديو ---
                                     st.session_state[f"result_{test_file}"] = result
+                                    st.session_state[f"video_{test_file}"] = video_path
                                     
                                 except subprocess.TimeoutExpired:
                                     st.error("Test Timed Out (Limit: 60s)")
@@ -344,6 +438,23 @@ if st.session_state.get("current_step") == "verification":
                                 st.success("✅ TEST PASSED")
                                 st.text("Output Logs:")
                                 st.code(res.stdout, language="bash")
+                                
+                                # عرض الفيديو إن وُجد
+                                video_key = f"video_{test_file}"
+                                if video_key in st.session_state and st.session_state[video_key]:
+                                    st.markdown("### 🎥 Test Execution Video")
+                                    video_path = st.session_state[video_key]
+                                    try:
+                                        if os.path.exists(video_path):
+                                            with open(video_path, 'rb') as vf:
+                                                st.video(vf.read())
+                                        else:
+                                            st.video(video_path)
+                                    except Exception as e:
+                                        print("DEBUG: failed to read/display video bytes:", e)
+                                        st.video(video_path)
+                                else:
+                                    st.info("No test video found for this run. If you want to capture video, use the '🔧 Inject Video Recording' helper on the generated script and re-run the test.")
                                 
                                 # --- SESSION CONTINUATION (THE LOOP) ---
                                 st.markdown("---")
@@ -396,44 +507,194 @@ if st.session_state.get("current_step") == "verification":
                                             st.rerun()
                                     else:
                                         st.warning("Please enter the URL you want to test next.")
-                            else:
+                            else:               
                                 st.error("❌ TEST FAILED")
                                 st.text("Error Trace:")
                                 st.code(res.stderr, language="bash")
-                                # If there was standard output before crash, show it too
-                                st.markdown("---")
-                                st.write("### 🚑 Self-Healing")
                                 
-                                if st.button(f"Attempt Auto-Fix for {test_file}", key=f"fix_{test_file}"):
-                                    with st.spinner("Analyzing error and patching code..."):
-                                        
+                                # عرض الفيديو إن وُجد
+                                video_key = f"video_{test_file}"
+                                if video_key in st.session_state and st.session_state[video_key]:
+                                    st.markdown("### 🎥 Test Execution Video")
+                                    video_path = st.session_state[video_key]
+                                    try:
+                                        if os.path.exists(video_path):
+                                            with open(video_path, 'rb') as vf:
+                                                st.video(vf.read())
+                                        else:
+                                            st.video(video_path)
+                                    except Exception as e:
+                                        print("DEBUG: failed to read/display video bytes:", e)
+                                        st.video(video_path)
+                                else:
+                                    st.info("No test video found for this run. If you want to capture video, use the '🔧 Inject Video Recording' helper on the generated script and re-run the test.")
+                                
+                                # --- SESSION CONTINUATION FOR SELF-HEALING ATTEMPTS ---
+                                healing_key = f"healing_{test_file}"
+                                if healing_key not in st.session_state:
+                                    st.session_state[healing_key] = {"attempts": 0}
+                                
+                                current_attempts = st.session_state[healing_key]["attempts"]
+                                max_attempts = 5
+                                
+                                if current_attempts < max_attempts:
+                                    st.session_state[healing_key]["attempts"] += 1
+                                    st.warning(f"🚑 Self-Healing: Attempt {current_attempts + 1}/{max_attempts}")
+                                    
+                                    with st.spinner("Analyzing error and patching code automatically..."):
                                         # 1. Read the broken file
                                         file_path = f"generated_tests/{test_file}"
                                         with open(file_path, "r", encoding="utf-8") as f:
                                             broken_code = f.read()
-                                        
+
                                         # 2. Call the Healer
                                         fixed_code = st.session_state.brain.fix_generated_code(
-                                            broken_code, 
-                                            res.stderr # Pass the error log
+                                            broken_code,
+                                            res.stderr
                                         )
-                                        
-                                        # 3. Overwrite the file with the fix
+
+                                        # 3. Overwrite the file
                                         with open(file_path, "w", encoding="utf-8") as f:
                                             f.write(fixed_code)
-                                            
-                                        st.success("Code patched! Try running it again.")
-                                        
-                                        # Optional: Clear the old error result so the UI looks clean
-                                        del st.session_state[f"result_{test_file}"]
+
+                                        # 4. Update session state so the UI reflects the patched code
+                                        try:
+                                            if "generated_code_map" not in st.session_state:
+                                                st.session_state.generated_code_map = {}
+
+                                            # Try to find the display key that matches this file
+                                            matched_key = None
+                                            for k in st.session_state.generated_code_map.keys():
+                                                safe = f"test_{k.lower().replace(' ', '_')}.py"
+                                                if safe == test_file:
+                                                    matched_key = k
+                                                    break
+
+                                            if matched_key:
+                                                st.session_state.generated_code_map[matched_key] = fixed_code
+                                                print(f"DEBUG: mapped patched code to key '{matched_key}'")
+                                            else:
+                                                # Fallback: use filename-derived key
+                                                fallback_key = test_file.replace("test_", "").replace(".py", "").replace("_", " ")
+                                                st.session_state.generated_code_map[fallback_key] = fixed_code
+                                                print(f"DEBUG: used fallback key '{fallback_key}' for patched code")
+
+                                            st.success("Code patched automatically and UI updated.")
+                                            print("DEBUG: Self-heal updated generated_code_map for:", test_file)
+                                        except Exception as e:
+                                            print("DEBUG: Failed to update generated_code_map:", e)
+
+                                        # 5. Clear old result
+                                        st.session_state.pop(f"result_{test_file}", None)
+
+                                        # Keep the expander open
+                                        try:
+                                            expand_key = f"expand_{test_file}"
+                                            st.session_state[expand_key] = True
+                                        except Exception:
+                                            pass
+
+                                        # 6. Re-run the patched test INLINE (no full rerun) so UI stays open
+                                        st.info("Re-running fixed test now...")
+                                        try:
+                                            video_dir = "test_videos"
+                                            os.makedirs(video_dir, exist_ok=True)
+                                            existing_videos = set(os.listdir(video_dir))
+
+                                            result2 = subprocess.run(
+                                                [sys.executable, f"generated_tests/{test_file}"],
+                                                capture_output=True,
+                                                text=True,
+                                                timeout=120
+                                            )
+
+                                            # Save result
+                                            st.session_state[f"result_{test_file}"] = result2
+
+                                            # Try to find new video(s)
+                                            new_videos = set(os.listdir(video_dir)) - existing_videos
+                                            video_path = None
+                                            if new_videos:
+                                                video_name = next(iter(new_videos))
+                                                video_path = os.path.join(video_dir, video_name)
+                                                st.session_state[f"video_{test_file}"] = video_path
+                                                st.success("Recorded video attached from test run.")
+                                            else:
+                                                # Fallback: attempt to copy the latest recorded video into artifacts using BrowserManager
+                                                try:
+                                                    copied = asyncio.run(st.session_state.browser_manager.copy_latest_video_to_artifacts(test_file.replace("test_", "").replace(".py", "")))
+                                                    if copied:
+                                                        st.session_state[f"video_{test_file}"] = copied
+                                                        st.success("Recorded video found and copied to artifacts.")
+                                                        video_path = copied
+                                                    else:
+                                                        st.info("No video was recorded during re-run.")
+                                                except Exception as e:
+                                                    print("DEBUG: fallback copy_latest_video_to_artifacts failed:", e)
+                                                    st.info("No video was recorded during re-run.")
+
+                                            # Ensure the UI shows the patched code inline so user can see it without reloading
+                                            try:
+                                                # Display the updated code right here
+                                                patched_display = None
+                                                if 'generated_code_map' in st.session_state:
+                                                    # find matching key
+                                                    for k in st.session_state.generated_code_map.keys():
+                                                        safe = f"test_{k.lower().replace(' ', '_')}.py"
+                                                        if safe == test_file:
+                                                            patched_display = st.session_state.generated_code_map[k]
+                                                            break
+                                                if not patched_display:
+                                                    # Try fallback filename key
+                                                    fallback_key = test_file.replace("test_", "").replace(".py", "").replace("_", " ")
+                                                    patched_display = st.session_state.generated_code_map.get(fallback_key, None)
+
+                                                if patched_display:
+                                                    st.markdown("**Patched Script (preview):**")
+                                                    st.code(patched_display, language="python")
+                                                else:
+                                                    st.info("Patched code applied to disk; refresh 'Generated Scripts' section to view it.")
+                                            except Exception as e:
+                                                print("DEBUG: while displaying patched code inline:", e)
+
+                                            # Show immediate outcome
+                                            if result2.returncode == 0:
+                                                st.success("✅ Re-run passed")
+                                                # also show stdout
+                                                if result2.stdout:
+                                                    st.text("Re-run output:")
+                                                    st.code(result2.stdout, language="bash")
+                                            else:
+                                                st.error("❌ Re-run failed; inspect logs below")
+                                                if result2.stderr:
+                                                    st.text("Re-run error:")
+                                                    st.code(result2.stderr, language="bash")
+
+                                        except Exception as e:
+                                            st.error(f"Re-run failed: {e}")
+
+                                        # Refresh the UI so the 'Generated Scripts' tabs reflect the patched code and any copied video.
+                                        # We already set the expander state so it will remain open after rerun.
                                         st.rerun()
+                                else:
+                                    st.error(f"🚑 Self-Healing FAILED after {max_attempts} attempts.")
+                        
             
             st.divider()
             if st.button("🔄 Start New Session (Reset)"):
                 # Clear state to loop back to Phase 1
                 for key in list(st.session_state.keys()):
                     del st.session_state[key]
+
+                # Also remove generated tests directory to avoid stale files
+                if os.path.exists("generated_tests"):
+                    try:
+                        shutil.rmtree("generated_tests")
+                    except Exception as e:
+                        print("DEBUG: Failed to remove generated_tests on reset:", e)
+
                 st.rerun()
+
 
 
 # Cleanup on exit (optional but good practice)
