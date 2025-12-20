@@ -1,10 +1,156 @@
 import ollama
 import json
 import re
+import os
+import time
+from langfuse import Langfuse
+from openai import OpenAI
+from dotenv import load_dotenv
+load_dotenv()
 
 class LLMBrain:
-    def __init__(self, model="llama3.2"): 
+    def __init__(
+        self,
+        model="llama3.2",
+        api_key=None,
+        api_base=None,
+        is_copilot=False
+        ):
         self.model = model
+        self.api_key = api_key
+        self.api_base = api_base
+        self.is_copilot = is_copilot
+
+        self.client = None
+        self.metrics = []
+
+        self.langfuse = Langfuse(
+            public_key=os.getenv("LANGFUSE_PUBLIC_KEY"),
+            secret_key=os.getenv("LANGFUSE_SECRET_KEY"),
+            host=os.getenv("LANGFUSE_HOST")
+        )
+
+        # ---- Global LLM  ----
+        OPENAI_AVAILABLE = api_key is not None
+
+        if OPENAI_AVAILABLE and self.api_key:
+            if self.is_copilot:
+                self.client = OpenAI(
+                    api_key=self.api_key,
+                    base_url=self.api_base,
+                    default_headers={
+                        "Copilot-Integration-Id": "vscode-chat",
+                        "Editor-Version": "vscode/1.85.0",
+                        "Editor-Plugin-Version": "copilot-chat/0.12.0",
+                        "Openai-Intent": "conversation-panel",
+                        "X-Request-Id": "qa-testing-agent",
+                        "Copilot-Vision-Request": "true"
+                    }
+                )
+                print("[LLM Config] Using GitHub Copilot mode with custom headers")
+            else:
+                self.client = OpenAI(
+                    api_key=self.api_key,
+                    base_url=self.api_base
+                )
+        else:
+            self.client = None
+
+    def chat(self, system_prompt, user_prompt, *, response_format=None, temperature=0.1):
+        start_time = time.time()
+        tokens = 0
+        content = None
+
+        # ----------------------
+        # Optional Langfuse Trace
+        # ----------------------
+        trace = None
+        generation = None
+
+        if self.langfuse:
+            trace = self.langfuse.trace(
+                name="agent_brain_iteration",
+                metadata={
+                    "model": self.model,
+                    "backend": "openai" if self.client else "ollama"
+                }
+            )
+
+            generation = trace.generation(
+                name="llm_call",
+                model=self.model,
+                input={
+                    "system": system_prompt,
+                    "user": user_prompt
+                }
+            )
+
+        try:
+            # ======================
+            # OPENAI / COPILOT
+            # ======================
+            if self.client:
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    temperature=temperature,
+                    response_format={"type": "json"} if response_format == "json" else None
+                )
+
+                content = response.choices[0].message.content
+                tokens = response.usage.total_tokens or 0
+
+            # ======================
+            # LOCAL (OLLAMA)
+            # ======================
+            else:
+                import ollama
+
+                response = ollama.chat(
+                    model=self.model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    format="json" if response_format == "json" else None,
+                    options={"temperature": temperature}
+                )
+
+                content = response["message"]["content"]
+                tokens = response.get("eval_count", 0)
+
+            # ----------------------
+            # Optional JSON Parsing
+            # ----------------------
+            if response_format == "json":
+                try:
+                    content = json.loads(content)
+                except json.JSONDecodeError:
+                    raise ValueError("Model returned invalid JSON")
+
+            latency = time.time() - start_time
+
+            if generation:
+                generation.end(
+                    output=content,
+                    usage={"total_tokens": tokens},
+                    metadata={"latency_sec": latency}
+                )
+
+            self.metrics.append({
+                "latency": latency,
+                "tokens": tokens
+            })
+
+            return content
+
+        except Exception as e:
+            if generation:
+                generation.end(error=str(e))
+            raise
 
     def generate_test_plan(self, scraped_data,memory_context=None):
         elements = scraped_data.get("elements", [])
@@ -43,20 +189,17 @@ class LLMBrain:
 
         print("🧠 Brain is thinking...")
         try:
-            response = ollama.chat(
-                model=self.model, 
-                messages=[
-                    {'role': 'system', 'content': system_prompt},
-                    {'role': 'user', 'content': user_prompt},
-                ],
-                format='json',
-                options={'temperature': 0.1}
+            content = self.chat(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                response_format="json",
+                temperature=0.1
             )
-            
-            content = response['message']['content']
+
+            parsed_json = json.loads(content)
+
             print(f"DEBUG: Raw LLM Output: {content}") # Keep this for debugging
             
-            parsed_json = json.loads(content)
             
             # --- FIX: ROBUST LIST EXTRACTION ---
             final_plan = []
@@ -161,17 +304,15 @@ class LLMBrain:
         print(f"🧠 Generating code for: {test_case['name']}...")
         
         try:
-            response = ollama.chat(
-                model=self.model, 
-                messages=[
-                    {'role': 'system', 'content': system_prompt},
-                    {'role': 'user', 'content': user_prompt},
-                ],
-                options={'temperature': 0.1} 
+            content = self.chat(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                response_format="json",
+                temperature=0.1
             )
-            
-            # Clean up Markdown (```python ... ```)
-            code = response['message']['content']
+
+            parsed_json = json.loads(content)
+
             if "```python" in code:
                 code = code.split("```python")[1].split("```")[0]
             elif "```" in code:
@@ -208,14 +349,15 @@ class LLMBrain:
         print("🚑 Healer Agent is fixing the code...")
         
         try:
-            response = ollama.chat(
-                model=self.model, 
-                messages=[
-                    {'role': 'system', 'content': system_prompt},
-                    {'role': 'user', 'content': user_prompt},
-                ],
-                options={'temperature': 0.1} # Low temp for precision
+            content = self.chat(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                response_format="json",
+                temperature=0.1
             )
+
+            parsed_json = json.loads(content)
+
             
             # Clean up Markdown
             code = response['message']['content']
@@ -227,10 +369,7 @@ class LLMBrain:
             return code.strip()
 
         except Exception as e:
-            return f"# Fix failed: {str(e)}"
-          
-          
-          
+            return f"# Fix failed: {str(e)}"      
     def refine_test_plan(self, current_plan, user_feedback, scraped_data):
         """
         Refines the existing test plan based on user critique.
@@ -264,18 +403,16 @@ class LLMBrain:
 
         print("🧠 Brain is refining the plan...")
         try:
-            response = ollama.chat(
-                model=self.model, 
-                messages=[
-                    {'role': 'system', 'content': system_prompt},
-                    {'role': 'user', 'content': user_prompt},
-                ],
-                format='json',
-                options={'temperature': 0.2}
+            content = self.chat(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                response_format="json",
+                temperature=0.1
             )
-            
-            content = response['message']['content']
+
             parsed_json = json.loads(content)
+
+
             
             # (Reuse your robust list extraction logic here)
             final_plan = []
@@ -383,17 +520,15 @@ DOM_SNIPPET:
 """
 
         try:
-            response = ollama.chat(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                format="json",
-                options={"temperature": 0.1},
+            content = self.chat(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                response_format="json",
+                temperature=0.1
             )
-            content = response["message"]["content"]
-            parsed = json.loads(content)
+
+            parsed_json = json.loads(content)
+
 
             # Minimal validation + defaults.
             follow = bool(parsed.get("follow", False))
