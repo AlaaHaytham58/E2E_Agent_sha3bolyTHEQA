@@ -29,7 +29,7 @@ class LLMBrain:
         self,
         model="gpt-5-mini",
         api_key=None,
-        is_copilot=True
+        is_copilot=False
     ):
         self.model = model
         self.api_key = api_key or os.getenv("API_KEY")
@@ -37,7 +37,7 @@ class LLMBrain:
 
         self.client = None
         self.metrics = []
-        self.llm_calls = 0  # ✅ FIX
+        self.llm_calls = 0 
 
         self.langfuse = Langfuse(
             public_key=os.getenv("LANGFUSE_PUBLIC_KEY"),
@@ -53,10 +53,11 @@ class LLMBrain:
                 )
                 print("[LLM Config] Using GitHub Copilot backend")
             else:
-                self.client = OpenAI(api_key=self.api_key)
-                print("[LLM Config] Using OpenAI backend")
-        else:
-            print("[LLM Config] No API key found, falling back to Ollama")
+                # self.client = OpenAI(api_key=self.api_key)
+                print("[LLM Config] No API key found, falling back to Ollama")
+
+        # else:
+        #     print("[LLM Config] No API key found, falling back to Ollama")
    
     def chat(
     self,
@@ -589,50 +590,64 @@ class LLMBrain:
         dom_snippet = (cleaned_dom or "")[:3000]
 
         system_prompt = f"""
+
 You are an expert QA assistant deciding whether to follow a navigation action during fully-automatic main-path exploration.
 
 Your job:
-- Decide if the candidate is part of the MAIN SERVICE FLOW.
-- Skip out-of-scope informational pages (e.g. About, Blog, Careers, Contact, Terms, Privacy, Help, FAQ).
+- Decide if the candidate action is part of the PRIMARY SERVICE FLOW needed to complete the user's goal.
+- Skip out-of-scope or informational pages that do not advance the main journey
+  (e.g., About, Blog, Careers, Contact, Terms, Privacy, Help, FAQ, Docs, Press, Community).
 
 This explorer supports two common journeys:
+
 1) SIGNUP / ONBOARDING WIZARD:
-   - Follow steps like Sign up / Register / Next / Continue / Submit / Finish.
-   - Skip unrelated navigation like About.
+   - In-scope actions: Sign up, Register, Get started, Next, Continue, Submit, Finish, Verify.
+   - Goal: reach a completed account / dashboard / confirmation.
+   - Skip unrelated navigation, marketing pages, and footer links.
+
 2) ECOMMERCE MAIN PATH:
    - Prefer a single end-to-end purchase flow:
-     Browse products -> open a product -> add to cart -> go to cart -> checkout.
-   - Skip unrelated informational navigation.
-   - Note: "Add to cart" may not change URL; it's still in-scope.
+     Browse/list products -> open a product -> add to cart -> view cart -> checkout -> payment.
+   - In-scope actions: product links, Add to cart, Cart, Checkout, Place order.
+   - Skip unrelated navigation and informational pages.
+   - Note: "Add to cart" may not change URL; still in-scope.
+
+OUT-OF-SCOPE examples:
+- Company info, policies, blogs, help centers, social links, external sites.
+
+BLOCKER examples:
+- Login/Signup required when already in checkout
+- Captcha, access denied, 404/500 errors
+- Broken links or disabled buttons
+- Hard paywalls that stop progress
 
 STRICT MODE: {"ON" if strict else "OFF"}
-If STRICT MODE is ON and you are unsure, return follow=false and category="unclear".
+If STRICT MODE is ON and you are uncertain, return:
+follow=false and category="unclear".
+
+IMPORTANT RULES:
+- Be conservative with header/footer or global navigation links.
+- Prefer actions that clearly advance the current journey.
+- Do NOT follow if the action might derail the main flow.
 
 OUTPUT RULES:
-1) Output MUST be valid JSON object (not a list, not markdown).
+1) Output MUST be a valid JSON object only.
 2) Schema:
    {{
      "follow": true|false,
      "confidence": 0.0-1.0,
-     "category": "service_flow"|"out_of_scope"|"blocker"|"unclear",
-     "reason": "...",
-     "suggested_phase": "signup"|"browse"|"product"|"cart"|"checkout"|"unknown"
+     "category": "service_flow" | "out_of_scope" | "blocker" | "unclear",
+     "reason": "short explanation",
+     "suggested_phase": "signup" | "browse" | "product" | "cart" | "checkout" | "unknown"
    }}
-3) Be conservative about following nav/footer links.
-"""
 
-        user_prompt = f"""
-JOURNEY_HINT: {journey_hint or "auto"}
-
-CURRENT_PAGE:
-- title: {title}
-- url: {url}
-
-CANDIDATE:
-{json.dumps(candidate, ensure_ascii=False)}
-
-DOM_SNIPPET:
-{dom_snippet}
+GUIDELINES:
+- Use category:
+  * service_flow → clearly advances the journey.
+  * out_of_scope → informational or irrelevant.
+  * blocker → prevents progress.
+  * unclear → ambiguous or insufficient info.
+- If category is not service_flow, suggested_phase should usually be "unknown".
 """
 
         try:
@@ -720,7 +735,6 @@ DOM_SNIPPET:
             "errors": errors,
             "per_model": per_model
         }
-
     # --------------------------------------------------
     # RESET METRICS
     # --------------------------------------------------

@@ -1,6 +1,4 @@
 import streamlit as st
-
-
 def config_model_selector():
     st.sidebar.header("Model Configuration")
 
@@ -32,7 +30,7 @@ def config_model_selector():
     # -----------------------------
     # Conditional model selector
     # -----------------------------
-    if model_mode == "API (Groq)":
+    if model_mode == "API (Copilot)":
         model_name = st.sidebar.selectbox(
             "Choose Copilot Model",
             copilot_models,

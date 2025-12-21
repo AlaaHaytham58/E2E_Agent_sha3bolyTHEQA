@@ -8,6 +8,8 @@ from llm_brain import LLMBrain
 import subprocess
 import sys
 import pandas as pd
+from ui_utils import config_model_selector
+
 
 
 # Fix for Playwright's async loop inside Streamlit
@@ -38,7 +40,6 @@ if "multipage_result" not in st.session_state:
 #     st.session_state.accepted_tests = []
 # if "test_plan" not in st.session_state:
 #     st.session_state.test_plan = []
-
 def render_llm_metrics_sidebar(brain):
     st.sidebar.header("📊 LLM Metrics")
 
@@ -75,15 +76,53 @@ def render_llm_metrics_sidebar(brain):
         st.sidebar.info("No LLM calls yet.")
 
 
-if "brain" not in st.session_state:
-    st.session_state.brain = LLMBrain()
+# if "brain" not in st.session_state:
+#     st.session_state.brain = LLMBrain()
 
-render_llm_metrics_sidebar(st.session_state.brain)
+def render_sidebar():
+    # 1. Model selector (from ui_utils)
+    config_model_selector()
+    
+    current_config = (
+        st.session_state.model_mode,
+        st.session_state.model_name,
+        st.session_state.api_key,
+    )
+    previous_config = st.session_state.get("_llm_config")
+
+    if current_config != previous_config:
+        st.session_state._llm_config = current_config
+
+        st.session_state.brain = LLMBrain(
+            model=st.session_state.model_name,
+            api_key=st.session_state.api_key,
+            # is_copilot=st.session_state.model_mode == "API (Copilot)",
+        )
+
+        st.toast("🔄 LLM backend switched")
+        
+    st.sidebar.divider()
+
+    # 2. LLM metrics
+    render_llm_metrics_sidebar(st.session_state.brain)
+
+    st.sidebar.divider()
+
+    # 3. System status
+    st.sidebar.header("🖥️ System Status")
+    st.sidebar.metric(
+        "Status",
+        "Ready" if "llm_output" in st.session_state else "Idle"
+    )
+render_sidebar()
+
+
+#render_llm_metrics_sidebar(st.session_state.brain)
 
 # Sidebar
-with st.sidebar:
-    st.header("System Metrics")
-    st.metric("Status", "Ready" if "llm_output" in st.session_state else "Idle")
+# with st.sidebar:
+#     st.header("System Metrics")
+#     st.metric("Status", "Ready" if "llm_output" in st.session_state else "Idle")
 
 # Main output
 if "llm_output" in st.session_state:
