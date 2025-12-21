@@ -12,13 +12,11 @@ class LLMBrain:
     def __init__(
         self,
         model="llama3.2",
-        api_key=None,
-        api_base=None,
-        is_copilot=False
+        api_key=os.getenv("OPENAI_API_KEY"),
+        is_copilot=True
         ):
         self.model = model
         self.api_key = api_key
-        self.api_base = api_base
         self.is_copilot = is_copilot
 
         self.client = None
@@ -37,7 +35,6 @@ class LLMBrain:
             if self.is_copilot:
                 self.client = OpenAI(
                     api_key=self.api_key,
-                    base_url=self.api_base,
                     default_headers={
                         "Copilot-Integration-Id": "vscode-chat",
                         "Editor-Version": "vscode/1.85.0",
@@ -51,7 +48,6 @@ class LLMBrain:
             else:
                 self.client = OpenAI(
                     api_key=self.api_key,
-                    base_url=self.api_base
                 )
         else:
             self.client = None
