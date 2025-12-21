@@ -29,7 +29,7 @@ class LLMBrain:
         self,
         model="gpt-5-mini",
         api_key=None,
-        is_copilot=False
+        is_copilot=True
     ):
         self.model = model
         self.api_key = api_key or os.getenv("API_KEY")
@@ -44,7 +44,7 @@ class LLMBrain:
             secret_key=os.getenv("LANGFUSE_SECRET_KEY"),
             host=os.getenv("LANGFUSE_HOST")
         )
-
+        print("copilot: ",self.is_copilot)
         if self.api_key:
             if self.is_copilot:
                 self.client = OpenAI(
@@ -108,7 +108,7 @@ class LLMBrain:
 
             else:
                 response = ollama.chat(
-                    model=self.model,
+                    model="freehuntx/qwen3-coder:8b",
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt}
@@ -370,7 +370,7 @@ class LLMBrain:
                 response_format="json",
                 temperature=0.1
             )
-
+            print(f"DEBUG: Raw LLM Output: {content}") # Keep this for debugging
             code = content
 
             if "```python" in code:
@@ -590,64 +590,74 @@ class LLMBrain:
 
         system_prompt = f"""
 
-You are an expert QA assistant deciding whether to follow a navigation action during fully-automatic main-path exploration.
+            You are an expert QA assistant deciding whether to follow a navigation action during fully-automatic main-path exploration.
 
-Your job:
-- Decide if the candidate action is part of the PRIMARY SERVICE FLOW needed to complete the user's goal.
-- Skip out-of-scope or informational pages that do not advance the main journey
-  (e.g., About, Blog, Careers, Contact, Terms, Privacy, Help, FAQ, Docs, Press, Community).
+            Your job:
+            - Decide if the candidate action is part of the PRIMARY SERVICE FLOW needed to complete the user's goal.
+            - Skip out-of-scope or informational pages that do not advance the main journey
+            (e.g., About, Blog, Careers, Contact, Terms, Privacy, Help, FAQ, Docs, Press, Community).
 
-This explorer supports two common journeys:
+            This explorer supports two common journeys:
 
-1) SIGNUP / ONBOARDING WIZARD:
-   - In-scope actions: Sign up, Register, Get started, Next, Continue, Submit, Finish, Verify.
-   - Goal: reach a completed account / dashboard / confirmation.
-   - Skip unrelated navigation, marketing pages, and footer links.
+            1) SIGNUP / ONBOARDING WIZARD:
+            - In-scope actions: Sign up, Register, Get started, Next, Continue, Submit, Finish, Verify.
+            - Goal: reach a completed account / dashboard / confirmation.
+            - Skip unrelated navigation, marketing pages, and footer links.
 
-2) ECOMMERCE MAIN PATH:
-   - Prefer a single end-to-end purchase flow:
-     Browse/list products -> open a product -> add to cart -> view cart -> checkout -> payment.
-   - In-scope actions: product links, Add to cart, Cart, Checkout, Place order.
-   - Skip unrelated navigation and informational pages.
-   - Note: "Add to cart" may not change URL; still in-scope.
+            2) ECOMMERCE MAIN PATH:
+            - Prefer a single end-to-end purchase flow:
+                Browse/list products -> open a product -> add to cart -> view cart -> checkout -> payment.
+            - In-scope actions: product links, Add to cart, Cart, Checkout, Place order.
+            - Skip unrelated navigation and informational pages.
+            - Note: "Add to cart" may not change URL; still in-scope.
 
-OUT-OF-SCOPE examples:
-- Company info, policies, blogs, help centers, social links, external sites.
+            OUT-OF-SCOPE examples:
+            - Company info, policies, blogs, help centers, social links, external sites.
 
-BLOCKER examples:
-- Login/Signup required when already in checkout
-- Captcha, access denied, 404/500 errors
-- Broken links or disabled buttons
-- Hard paywalls that stop progress
+            BLOCKER examples:
+            - Login/Signup required when already in checkout
+            - Captcha, access denied, 404/500 errors
+            - Broken links or disabled buttons
+            - Hard paywalls that stop progress
 
-STRICT MODE: {"ON" if strict else "OFF"}
-If STRICT MODE is ON and you are uncertain, return:
-follow=false and category="unclear".
+            STRICT MODE: {"ON" if strict else "OFF"}
+            If STRICT MODE is ON and you are uncertain, return:
+            follow=false and category="unclear".
 
-IMPORTANT RULES:
-- Be conservative with header/footer or global navigation links.
-- Prefer actions that clearly advance the current journey.
-- Do NOT follow if the action might derail the main flow.
+            IMPORTANT RULES:
+            - Be conservative with header/footer or global navigation links.
+            - Prefer actions that clearly advance the current journey.
+            - Do NOT follow if the action might derail the main flow.
 
-OUTPUT RULES:
-1) Output MUST be a valid JSON object only.
-2) Schema:
-   {{
-     "follow": true|false,
-     "confidence": 0.0-1.0,
-     "category": "service_flow" | "out_of_scope" | "blocker" | "unclear",
-     "reason": "short explanation",
-     "suggested_phase": "signup" | "browse" | "product" | "cart" | "checkout" | "unknown"
-   }}
+            OUTPUT RULES:
+            1) Output MUST be a valid JSON object only.
+            2) Schema:
+            {{
+                "follow": true|false,
+                "confidence": 0.0-1.0,
+                "category": "service_flow" | "out_of_scope" | "blocker" | "unclear",
+                "reason": "short explanation",
+                "suggested_phase": "signup" | "browse" | "product" | "cart" | "checkout" | "unknown"
+            }}
 
-GUIDELINES:
-- Use category:
-  * service_flow → clearly advances the journey.
-  * out_of_scope → informational or irrelevant.
-  * blocker → prevents progress.
-  * unclear → ambiguous or insufficient info.
-- If category is not service_flow, suggested_phase should usually be "unknown".
-"""
+            GUIDELINES:
+            - Use category:
+            * service_flow → clearly advances the journey.
+            * out_of_scope → informational or irrelevant.
+            * blocker → prevents progress.
+            * unclear → ambiguous or insufficient info.
+            - If category is not service_flow, suggested_phase should usually be "unknown".
+            """
+        user_prompt = f"""
+            **Current Page Title:** {title}
+            **Current Page URL:** {url}
+            **Current Page DOM Snippet:** {dom_snippet}
+
+            **Candidate Action Details:**
+            {json.dumps(candidate)}
+
+            {"**Journey Hint:** " + journey_hint if journey_hint else ""}
+            """
 
         try:
             content = self.chat(
