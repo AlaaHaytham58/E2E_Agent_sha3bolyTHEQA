@@ -9,21 +9,19 @@ from openai import OpenAI
 from dotenv import load_dotenv
 load_dotenv()
 def normalize_llm_output(content):
-    """
-    Ensures LLM output is returned as a Python list of dicts.
-    Accepts:
-      - JSON string
-      - already-parsed list
-    """
     if isinstance(content, list):
-        # Already parsed
         return content
 
     if isinstance(content, str):
         content = content.strip()
-        return json.loads(content)
+        if not content:
+            return content
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError:
+            return content  # 👈 fallback to raw string
 
-    raise TypeError(f"Unsupported LLM output type: {type(content)}")
+    return content
 class LLMBrain:
     def __init__(
         self,
@@ -215,114 +213,73 @@ class LLMBrain:
             if memory_context.get("emulate"):
                 memory_prompt += "\n\n✅ PATTERNS TO FOLLOW (Accepted previously):\n" + "\n".join(memory_context["emulate"])
         system_prompt = f"""
-You are a senior QA Automation Engineer specializing in Playwright E2E testing.
+You are a senior QA Automation Engineer specializing in Playwright end-to-end testing.
 
 Your task:
-Analyze the provided HTML/DOM and visible elements, then generate 3–5
-high-value end-to-end test scenarios that reflect realistic user behavior.
-
-The tests should focus on CORE USER FLOWS (e.g., login, signup, checkout,
-form submission, navigation, CRUD actions) — not trivial UI checks.
+Analyze the provided HTML/DOM and generate 3–5 high-quality test scenarios that represent
+realistic user flows and edge cases suitable for Playwright automation.
 
 ========================
-🚨 OUTPUT RULES (STRICT)
+OUTPUT REQUIREMENTS
 ========================
-1. Output MUST be a valid JSON ARRAY only.
-2. Do NOT wrap in markdown. Do NOT add explanations.
-3. Each item MUST strictly follow this schema:
-
-[
-  {{
-    "name": string,
-    "description": string,
-    "missing_data": list[string],
-    "requires_auth": boolean
-  }}
-]
-
-4. No trailing commas. No comments. No extra fields.
+1. Output MUST be a valid JSON array only. No markdown. No explanations. No trailing text.
+2. Each item MUST strictly follow this schema:
+   {{
+     "name": string,
+     "description": string,
+     "missing_data": list[string],
+     "requires_auth": boolean
+   }}
+3. Do NOT include any keys other than the four above.
+4. The response MUST start with '[' and end with ']'.
 
 ========================
-🧪 TEST QUALITY RULES
+TEST DESIGN RULES
 ========================
-5. Each test MUST:
-   - Be automatable using Playwright.
-   - Describe a full user journey (actions + assertions).
-   - Include at least one meaningful assertion
-     (URL change, success message, element visible, data updated, etc.).
-
-6. Prefer user-centric actions:
-   - click buttons/links
-   - fill inputs
-   - submit forms
-   - navigate pages
-   - verify results
-
-7. Avoid:
-   - “Page loads” only tests.
-   - Duplicate or overlapping scenarios.
-   - Pure UI style checks (colors, fonts).
+5. Generate 3 to 5 scenarios only.
+6. Prefer end-to-end, user-visible flows over low-level UI checks.
+7. Include at least:
+   - One positive (happy path) scenario.
+   - One negative or validation scenario when applicable.
+8. Avoid duplicate or overlapping scenarios.
+9. Do NOT invent features or elements not present in the HTML.
 
 ========================
-🔎 SELECTOR GUIDANCE
+DATA HANDLING RULES
 ========================
-8. When describing steps, prefer resilient selectors:
-   - get_by_role()
-   - get_by_label()
-   - get_by_text()
-   - get_by_placeholder()
-   over brittle CSS/XPath.
+10. "missing_data" should include ONLY dynamic values the user must later provide
+    (e.g., "valid_username", "valid_password", "search_keyword").
+11. If a field must be EMPTY for a negative test, DO NOT include it in "missing_data".
+    Examples:
+      ✅ Name: "Login with empty password"
+         missing_data: ["username"]
+      ❌ missing_data: ["username", "password"]
+12. For static or visible text already in the HTML, do NOT request it as missing data.
+13. If no external data is needed, return an empty list: [].
 
 ========================
-📥 DATA HANDLING RULES
+AUTH RULES
 ========================
-9. "missing_data" is ONLY for values the user must provide later, such as:
-   - valid_username
-   - valid_password
-   - email
-   - product_name
-
-10. If a value is clearly available in the DOM (e.g., visible text, options),
-    do NOT ask for it in "missing_data".
-
-11. NEGATIVE TESTS:
-    If a field must be EMPTY, do NOT include it in missing_data.
-    Example:
-      Name: "Login with empty password"
-      missing_data: ["username"]
+14. Set "requires_auth" to true ONLY if the scenario assumes the user must already be logged in
+    before starting the steps.
+15. If the scenario includes login as part of the flow, set it to false.
 
 ========================
-🔐 AUTH RULES
+QUALITY BAR
 ========================
-12. Set "requires_auth": true ONLY if:
-    - The test assumes the user is already logged in
-    - Or starts from an authenticated area (dashboard, profile, etc.)
-
-    Otherwise, false.
+16. Names must be concise and descriptive (max ~8–10 words).
+17. Descriptions must be clear step-by-step actions and expected results.
+18. Avoid vague phrases like "verify it works" or "check behavior".
 
 ========================
-🧠 REASONING RULES
+LESSONS LEARNED (RAG)
 ========================
-13. Base scenarios STRICTLY on:
-    - Provided DOM
-    - Elements list
-    - Page title
-
-14. Do NOT invent pages, features, or flows not implied by the content.
-
-15. If the page appears to be:
-    - Auth page → include login/validation flows.
-    - Product/listing → include browse/select/action flows.
-    - Form → include submit & validation flows.
-    - Dashboard → include core management actions.
-
-========================
-📚 LESSONS LEARNED (RAG)
-========================
-You MUST respect the following guidance from past feedback:
 {memory_prompt}
 
-Return ONLY the JSON array.
+========================
+FINAL REMINDER
+========================
+Return ONLY the JSON array. Any text outside JSON is a failure.
 """
         
         user_prompt = f"""
