@@ -23,7 +23,7 @@ if "scraped_data" not in st.session_state:
 
 # Salma: Multipage Explorartion
 if "brain" not in st.session_state:
-    st.session_state.brain = LLMBrain(model="qwen3:4b") # Make sure you have this model pulled!
+    st.session_state.brain = LLMBrain() # Make sure you have this model pulled!
 
 # Salma: Multipage Explorartion
 if "multipage_result" not in st.session_state:

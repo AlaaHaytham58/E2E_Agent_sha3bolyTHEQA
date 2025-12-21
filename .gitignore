@@ -3,7 +3,8 @@
 
 # Auth file (anywhere in the repo)
 auth.json
-
+*.cpython
+*.pyc
 # Generated test files
 generated_tests/
 

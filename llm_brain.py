@@ -7,20 +7,36 @@ from langfuse import Langfuse
 from openai import OpenAI
 from dotenv import load_dotenv
 load_dotenv()
+def normalize_llm_output(content):
+    """
+    Ensures LLM output is returned as a Python list of dicts.
+    Accepts:
+      - JSON string
+      - already-parsed list
+    """
+    if isinstance(content, list):
+        # Already parsed
+        return content
 
+    if isinstance(content, str):
+        content = content.strip()
+        return json.loads(content)
+
+    raise TypeError(f"Unsupported LLM output type: {type(content)}")
 class LLMBrain:
     def __init__(
         self,
-        model="llama3.2",
-        api_key=os.getenv("OPENAI_API_KEY"),
+        model="gpt-5-mini",
+        api_key=None,
         is_copilot=True
-        ):
+    ):
         self.model = model
-        self.api_key = api_key
+        self.api_key = api_key or os.getenv("API_KEY")
         self.is_copilot = is_copilot
 
         self.client = None
         self.metrics = []
+        self.llm_calls = 0  # ✅ FIX
 
         self.langfuse = Langfuse(
             public_key=os.getenv("LANGFUSE_PUBLIC_KEY"),
@@ -28,44 +44,33 @@ class LLMBrain:
             host=os.getenv("LANGFUSE_HOST")
         )
 
-        # ---- Global LLM  ----
-        OPENAI_AVAILABLE = api_key is not None
-
-        if OPENAI_AVAILABLE and self.api_key:
+        if self.api_key:
             if self.is_copilot:
                 self.client = OpenAI(
-                    api_key=self.api_key,
-                    default_headers={
-                        "Copilot-Integration-Id": "vscode-chat",
-                        "Editor-Version": "vscode/1.85.0",
-                        "Editor-Plugin-Version": "copilot-chat/0.12.0",
-                        "Openai-Intent": "conversation-panel",
-                        "X-Request-Id": "qa-testing-agent",
-                        "Copilot-Vision-Request": "true"
-                    }
+                    api_key=os.getenv("API_KEY"),
+                    base_url="https://api.githubcopilot.com"
                 )
-                print("[LLM Config] Using GitHub Copilot mode with custom headers")
+                print("[LLM Config] Using GitHub Copilot backend")
             else:
-                self.client = OpenAI(
-                    api_key=self.api_key,
-                )
+                self.client = OpenAI(api_key=self.api_key)
+                print("[LLM Config] Using OpenAI backend")
         else:
-            self.client = None
+            print("[LLM Config] No API key found, falling back to Ollama")
+   
     def chat(
-        self,
-        system_prompt,
-        user_prompt,
-        *,
-        response_format=None,
-        temperature=0.1,
-        parse_matrix=True,
-        to_numpy=False
+    self,
+    system_prompt,
+    user_prompt,
+    *,
+    response_format=None,
+    temperature=0.1,
+    parse_matrix=True,
+    to_numpy=False
     ):
         start_time = time.time()
         tokens = 0
         content = None
-        parsed_content = None
-        # ✅ LLM CALL COUNT
+
         self.llm_calls += 1
         trace = None
         generation = None
@@ -89,9 +94,6 @@ class LLMBrain:
             )
 
         try:
-            # ======================
-            # OPENAI
-            # ======================
             if self.client:
                 response = self.client.chat.completions.create(
                     model=self.model,
@@ -99,19 +101,11 @@ class LLMBrain:
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt}
                     ],
-                    temperature=temperature,
-                    response_format={"type": "json"} if response_format == "json" else None
                 )
-
                 content = response.choices[0].message.content
-                tokens = getattr(response.usage, "total_tokens", 0) or 0
+                tokens = response.usage.total_tokens or 0
 
-            # ======================
-            # OLLAMA
-            # ======================
             else:
-                import ollama
-
                 response = ollama.chat(
                     model=self.model,
                     messages=[
@@ -121,71 +115,45 @@ class LLMBrain:
                     format="json" if response_format == "json" else None,
                     options={"temperature": temperature}
                 )
-
                 content = response["message"]["content"]
                 tokens = response.get("eval_count", 0)
 
-            # ======================
-            # AUTO PARSE (SAFE)
-            # ======================
-            if parse_matrix and content:
-                try:
-                    parsed_content = json.loads(content)
+            content = normalize_llm_output(content)
 
-                    # Auto-detect matrix (list of lists)
-                    if (
-                        isinstance(parsed_content, list)
-                        and all(isinstance(row, list) for row in parsed_content)
-                    ):
-                        if to_numpy:
-                            import numpy as np
-                            parsed_content = np.array(parsed_content)
-
-                except json.JSONDecodeError:
-                    parsed_content = content
-            else:
-                parsed_content = content
-
-            # ======================
-            # METRICS
-            # ======================
             elapsed = time.time() - start_time
-            mode = "openai" if self.client else "ollama"
-
-            if generation:
-                generation.end(
-                    output=parsed_content,
-                    usage={"total_tokens": tokens},
-                    metadata={"latency_sec": elapsed}
-                )
-
             self.metrics.append({
                 "model": self.model,
-                "mode": mode,
+                "mode": "openai" if self.client else "ollama",
                 "time": elapsed,
                 "tokens": tokens,
                 "llm_calls": self.llm_calls
             })
 
-            return parsed_content
+            if generation:
+                generation.end(
+                    output=content,
+                    usage={"total_tokens": tokens},
+                    metadata={"latency_sec": elapsed}
+                )
+
+            return content  # ✅ RETURN HERE
 
         except Exception as e:
             elapsed = time.time() - start_time
-            mode = "openai" if self.client else "ollama"
-
             self.metrics.append({
                 "model": self.model,
-                "mode": mode,
+                "mode": "openai" if self.client else "ollama",
                 "time": elapsed,
                 "tokens": 0,
                 "error": str(e),
                 "llm_calls": self.llm_calls
-
             })
-            print("❌ LLM ERROR:", e)
+
             if generation:
                 generation.end(error=str(e))
-            raise  
+
+            raise RuntimeError(f"LLM call failed: {e}")
+    
     def generate_test_plan(self, scraped_data,memory_context=None):
         elements = scraped_data.get("elements", [])
         clean_dom = scraped_data.get("cleaned_dom", "")[:10000] 
@@ -230,7 +198,7 @@ class LLMBrain:
                 temperature=0.1
             )
 
-            parsed_json = json.loads(content)
+            parsed_json = content
 
             print(f"DEBUG: Raw LLM Output: {content}") # Keep this for debugging
             
@@ -345,7 +313,7 @@ class LLMBrain:
                 temperature=0.1
             )
 
-            parsed_json = json.loads(content)
+            code = content
 
             if "```python" in code:
                 code = code.split("```python")[1].split("```")[0]
@@ -389,12 +357,8 @@ class LLMBrain:
                 response_format="json",
                 temperature=0.1
             )
-
-            parsed_json = json.loads(content)
-
-            
             # Clean up Markdown
-            code = response['message']['content']
+            code = content
             if "```python" in code:
                 code = code.split("```python")[1].split("```")[0]
             elif "```" in code:
@@ -444,7 +408,7 @@ class LLMBrain:
                 temperature=0.1
             )
 
-            parsed_json = json.loads(content)
+            parsed_json = content
 
 
             
@@ -560,7 +524,7 @@ DOM_SNIPPET:
                 temperature=0.1
             )
 
-            parsed_json = json.loads(content)
+            parsed = content
 
 
             # Minimal validation + defaults.
