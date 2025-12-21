@@ -39,10 +39,21 @@ if "multipage_result" not in st.session_state:
 # if "test_plan" not in st.session_state:
 #     st.session_state.test_plan = []
 
-# --- SIDEBAR: METRICS ---
+
+# Sidebar
 with st.sidebar:
     st.header("System Metrics")
-    st.metric("Status", "Ready" if st.session_state.scraped_data else "Idle")
+    st.metric("Status", "Ready" if "llm_output" in st.session_state else "Idle")
+    st.metric("Tokens Used", st.session_state.get("tokens", 0))
+    st.metric("Latency (sec)", round(st.session_state.get("latency", 0.0), 3))
+    st.metric("LLM Calls", st.session_state.get("llm_calls", 0))
+
+# Main output
+if "llm_output" in st.session_state:
+    st.subheader("Output")
+    st.dataframe(st.session_state.llm_output)
+
+
 
 # --- MAIN LAYOUT ---
 st.title("🤖 Human-in-the-Loop Web Tester")

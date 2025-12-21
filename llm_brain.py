@@ -51,15 +51,22 @@ class LLMBrain:
                 )
         else:
             self.client = None
-
-    def chat(self, system_prompt, user_prompt, *, response_format=None, temperature=0.1):
+    def chat(
+        self,
+        system_prompt,
+        user_prompt,
+        *,
+        response_format=None,
+        temperature=0.1,
+        parse_matrix=True,
+        to_numpy=False
+    ):
         start_time = time.time()
         tokens = 0
         content = None
-
-        # ----------------------
-        # Optional Langfuse Trace
-        # ----------------------
+        parsed_content = None
+        # ✅ LLM CALL COUNT
+        self.llm_calls += 1
         trace = None
         generation = None
 
@@ -83,7 +90,7 @@ class LLMBrain:
 
         try:
             # ======================
-            # OPENAI / COPILOT
+            # OPENAI
             # ======================
             if self.client:
                 response = self.client.chat.completions.create(
@@ -97,10 +104,10 @@ class LLMBrain:
                 )
 
                 content = response.choices[0].message.content
-                tokens = response.usage.total_tokens or 0
+                tokens = getattr(response.usage, "total_tokens", 0) or 0
 
             # ======================
-            # LOCAL (OLLAMA)
+            # OLLAMA
             # ======================
             else:
                 import ollama
@@ -118,36 +125,67 @@ class LLMBrain:
                 content = response["message"]["content"]
                 tokens = response.get("eval_count", 0)
 
-            # ----------------------
-            # Optional JSON Parsing
-            # ----------------------
-            if response_format == "json":
+            # ======================
+            # AUTO PARSE (SAFE)
+            # ======================
+            if parse_matrix and content:
                 try:
-                    content = json.loads(content)
-                except json.JSONDecodeError:
-                    raise ValueError("Model returned invalid JSON")
+                    parsed_content = json.loads(content)
 
-            latency = time.time() - start_time
+                    # Auto-detect matrix (list of lists)
+                    if (
+                        isinstance(parsed_content, list)
+                        and all(isinstance(row, list) for row in parsed_content)
+                    ):
+                        if to_numpy:
+                            import numpy as np
+                            parsed_content = np.array(parsed_content)
+
+                except json.JSONDecodeError:
+                    parsed_content = content
+            else:
+                parsed_content = content
+
+            # ======================
+            # METRICS
+            # ======================
+            elapsed = time.time() - start_time
+            mode = "openai" if self.client else "ollama"
 
             if generation:
                 generation.end(
-                    output=content,
+                    output=parsed_content,
                     usage={"total_tokens": tokens},
-                    metadata={"latency_sec": latency}
+                    metadata={"latency_sec": elapsed}
                 )
 
             self.metrics.append({
-                "latency": latency,
-                "tokens": tokens
+                "model": self.model,
+                "mode": mode,
+                "time": elapsed,
+                "tokens": tokens,
+                "llm_calls": self.llm_calls
             })
 
-            return content
+            return parsed_content
 
         except Exception as e:
+            elapsed = time.time() - start_time
+            mode = "openai" if self.client else "ollama"
+
+            self.metrics.append({
+                "model": self.model,
+                "mode": mode,
+                "time": elapsed,
+                "tokens": 0,
+                "error": str(e),
+                "llm_calls": self.llm_calls
+
+            })
+            print("❌ LLM ERROR:", e)
             if generation:
                 generation.end(error=str(e))
-            raise
-
+            raise  
     def generate_test_plan(self, scraped_data,memory_context=None):
         elements = scraped_data.get("elements", [])
         clean_dom = scraped_data.get("cleaned_dom", "")[:10000] 
@@ -435,7 +473,6 @@ class LLMBrain:
 
         except Exception as e:
             return [{"name": "Error Refining Plan", "description": str(e), "is_error": True}]
-
     # Salma: Multipage Explorartion
     def classify_navigation_candidate(
         self,
@@ -567,3 +604,42 @@ DOM_SNIPPET:
                 "reason": f"classifier_error: {str(e)}",
                 "suggested_phase": "unknown",
             }
+    def get_metrics_summary(self):
+        if not self.metrics:
+            return {
+                "total_calls": 0,
+                "total_tokens": 0,
+                "average_time": 0.0,
+                "errors": 0,
+                "per_model": {}
+            }
+
+        total_time = sum(m["time"] for m in self.metrics)
+        total_tokens = sum(m.get("tokens", 0) for m in self.metrics)
+        errors = sum(1 for m in self.metrics if "error" in m)
+
+        per_model = {}
+        for m in self.metrics:
+            key = f"{m['mode']} / {m['model']}"
+            stats = per_model.setdefault(
+                key, {"count": 0, "total_time": 0.0, "total_tokens": 0, "errors": 0}
+            )
+            stats["count"] += 1
+            stats["total_time"] += m["time"]
+            stats["total_tokens"] += m.get("tokens", 0)
+            if "error" in m:
+                stats["errors"] += 1
+
+        return {
+            "total_calls": len(self.metrics),
+            "total_tokens": total_tokens,
+            "average_time": total_time / len(self.metrics),
+            "errors": errors,
+            "per_model": per_model
+        }
+
+    # --------------------------------------------------
+    # RESET METRICS
+    # --------------------------------------------------
+    def reset_metrics(self):
+        self.metrics.clear()
