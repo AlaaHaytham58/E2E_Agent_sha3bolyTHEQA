@@ -15,6 +15,17 @@ from ui_utils import config_model_selector
 # Fix for Playwright's async loop inside Streamlit
 nest_asyncio.apply()
 
+# ---- Auto cleanup on new Streamlit session ----
+if "initialized" not in st.session_state:
+    st.session_state.initialized = True
+
+    for folder in ["generated_tests", "test_videos", "artifacts"]:
+        if os.path.exists(folder):
+            try:
+                shutil.rmtree(folder)
+            except Exception as e:
+                print(f"Cleanup failed for {folder}: {e}")
+
 st.set_page_config(layout="wide", page_title="AI QA Agent")
 
 # Initialize Session State
@@ -861,16 +872,21 @@ if st.session_state.get("current_step") == "verification":
             
             st.divider()
             if st.button("🔄 Start New Session (Reset)"):
-                # Clear state to loop back to Phase 1
+                # Clear session state
                 for key in list(st.session_state.keys()):
                     del st.session_state[key]
-
-                # Also remove generated tests directory to avoid stale files
-                if os.path.exists("generated_tests"):
+                if "browser_manager" in st.session_state:
                     try:
-                        shutil.rmtree("generated_tests")
-                    except Exception as e:
-                        print("DEBUG: Failed to remove generated_tests on reset:", e)
+                        asyncio.run(st.session_state.browser_manager.close())
+                    except:
+                        pass
+                # Remove generated folders
+                for folder in ["generated_tests", "test_videos", "artifacts"]:
+                    if os.path.exists(folder):
+                        try:
+                            shutil.rmtree(folder)
+                        except Exception as e:
+                            print(f"Failed to remove {folder}: {e}")
 
                 st.rerun()
 
